@@ -131,6 +131,44 @@ def generate_flashcards(prompt: str) -> list:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def generate_single_flashcard(prompt: str) -> dict:
+    """Call Gemini API and return flashcards"""
+    try:
+        result = MODEL.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.3,
+                max_output_tokens=2048,
+                response_mime_type="application/json"
+            )
+        )
+        
+        if result.candidates and result.candidates[0].content.parts:
+            ai_reply = "".join(
+                p.text for p in result.candidates[0].content.parts if hasattr(p, "text")
+            )
+        else:
+            raise HTTPException(status_code=500, detail="Empty AI response")
+        
+        parsed = parse_json(ai_reply)
+
+        if isinstance(parsed, list):
+            parsed = parsed[0] if parsed else {}
+        
+        title = parsed.get("title", "").strip()
+        content = parsed.get("content", "").strip()
+
+        if not title or not content:
+            raise HTTPException(status_code=500, detail="No valid flashcard generated")
+        
+        return {"title": title, "content": content}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/flashcards/from-file")
 async def flashcards_from_file(file: UploadFile = File(...)):
     """Generate flashcards from PDF/DOCX/PPTX file"""
@@ -235,11 +273,9 @@ async def flashcards_from_title(title: str):
     prompt = f"""Create educational flashcards for each topic below.
 
 Return ONLY valid JSON in this format:
-{{
-  "flashcards": [
+
     {{"title": "Exact title from input", "content": "Educational explanation (2-4 sentences)"}}
-  ]
-}}
+
 
 Rules:
 - One flashcard per title
@@ -252,8 +288,8 @@ Topics:
 
 Return only the JSON object."""
     
-    flashcards = generate_flashcards(prompt)
-    return {"flashcards": flashcards}
+    flashcards = generate_single_flashcard(prompt)
+    return {"flashcard": flashcards}
 
 @app.post("/quiz/from-file")
 async def quiz_from_file(file: UploadFile = File(...), instruction: str = None):
