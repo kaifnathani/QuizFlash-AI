@@ -14,7 +14,7 @@ if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY not set in .env file.")
 
 genai.configure(api_key=GEMINI_API_KEY)
-MODEL = genai.GenerativeModel("gemini-2.0-flash-exp")
+MODEL = genai.GenerativeModel("gemini-2.5-flash")
 
 app = FastAPI(title="Flashcard API", version="2.0.0")
 
@@ -171,58 +171,145 @@ def generate_single_flashcard(prompt: str) -> dict:
 
 @app.post("/flashcards/from-file")
 async def flashcards_from_file(file: UploadFile = File(...)):
-    """Generate flashcards from PDF/DOCX/PPTX file"""
-    
+    """Generate flashcards from PDF/DOCX/PPTX file using Gemini 1.5 multimodal"""
+
     # Validate file type
     filename = file.filename.lower()
     if not (filename.endswith('.pdf') or filename.endswith('.docx') or filename.endswith('.pptx')):
         raise HTTPException(status_code=400, detail="Only PDF, DOCX, and PPTX files supported")
-    
-    # Read and encode file
-    contents = await file.read()
-    if len(contents) == 0:
-        raise HTTPException(status_code=400, detail="Empty file")
-    
-    if len(contents) > 15_000_000:  # 15MB limit
-        raise HTTPException(status_code=400, detail="File too large (max 15MB)")
-    
-    b64 = base64.b64encode(contents).decode('ascii')
-    
-    # Determine MIME type
-    if filename.endswith('.pdf'):
-        mime = "application/pdf"
-    elif filename.endswith('.docx'):
-        mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    else:
-        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    
-    # Build prompt
-    prompt = f"""Extract key concepts and create flashcards from this document.
+
+    # Save file temporarily
+    temp_path = f"/tmp/{filename}"
+    with open(temp_path, "wb") as f:
+        f.write(await file.read())
+
+    # Upload file to Gemini
+    uploaded_file = genai.upload_file(temp_path)
+
+    prompt = """
+You are an educational assistant. Read the provided document and extract key concepts to create clear and concise flashcards.
 
 Return ONLY valid JSON in this format:
-{{
+{
   "flashcards": [
-    {{"title": "Concept title (3-8 words)", "content": "Clear explanation (1-3 sentences)"}}
+    {"title": "Concept title (3–8 words)", "content": "Clear explanation (1–3 sentences)"}
+  ]
+}
+
+Rules:
+- Generate 5–25 flashcards
+- Use plain text only (no markdown)
+- Each flashcard must be factual and educational
+"""
+
+    # Generate flashcards
+    result = MODEL.generate_content([prompt, uploaded_file])
+    if not result.candidates or not result.candidates[0].content.parts:
+        raise HTTPException(status_code=500, detail="Empty AI response")
+
+    ai_reply = "".join(
+        p.text for p in result.candidates[0].content.parts if hasattr(p, "text")
+    )
+    parsed = parse_json(ai_reply)
+    flashcards = parsed.get("flashcards", [])
+
+    if not flashcards:
+        raise HTTPException(status_code=500, detail="No valid flashcards generated")
+
+    return {"flashcards": flashcards}
+
+
+
+@app.post("/flashcards/from-title")
+async def flashcards_from_title(title: str):
+    """Generate detailed flashcards from topic title"""
+    
+    if not title or not title.strip():
+        raise HTTPException(status_code=400, detail="Title cannot be empty")
+
+    title = title.strip()
+
+    prompt = f"""Create educational flashcards for each topic below.
+
+Return ONLY valid JSON in this format:
+
+    {{"title": "Exact title from input", "content": "Educational explanation (2-4 sentences)"}}
+
+
+Rules:
+- One flashcard per title
+- Accurate and informative content
+- Clear language for students
+- No markdown or special formatting
+
+Topics:
+\"\"\"{title}\"\"\"
+
+Return only the JSON object."""
+    
+    flashcards = generate_single_flashcard(prompt)
+    return {"flashcard": flashcards}
+
+@app.post("/quiz/from-file")
+async def quiz_from_file(file: UploadFile = File(...), instruction: str = None):
+    """Generate MCQ quiz from PDF/DOCX/PPTX file using Gemini 1.5 multimodal"""
+
+    filename = file.filename.lower()
+    if not (filename.endswith('.pdf') or filename.endswith('.docx') or filename.endswith('.pptx')):
+        raise HTTPException(status_code=400, detail="Only PDF, DOCX, and PPTX files supported")
+
+    # Save file temporarily
+    temp_path = f"/tmp/{filename}"
+    with open(temp_path, "wb") as f:
+        f.write(await file.read())
+
+    # Upload to Gemini
+    uploaded_file = genai.upload_file(temp_path)
+
+    teacher_note = f"Teacher Instruction: {instruction}\n" if instruction else ""
+
+    prompt = f"""
+{teacher_note}
+You are an expert educational content creator. Read the document and generate multiple-choice quiz questions.
+
+Return ONLY valid JSON in the following structure:
+{{
+  "quiz": [
+    {{
+      "question": "Meaningful question text?",
+      "options": {{
+        "a": "Option A",
+        "b": "Option B",
+        "c": "Option C",
+        "d": "Option D"
+      }},
+      "answer": "a | b | c | d"
+    }}
   ]
 }}
 
 Rules:
-- One concept per flashcard
-- 5-25 flashcards based on content
-- Factual and educational
-- No markdown or special formatting
+- 5–15 questions (or per teacher instruction)
+- Each question must have exactly 4 options (a–d)
+- One correct answer only
+- Use plain text only (no markdown)
+- Focus on key definitions and concepts
+"""
 
-Document:
-[BINARY_FILE]
-MIME:{mime}
-FILENAME:{filename}
-BASE64_DATA:{b64}
-[/BINARY_FILE]
+    result = MODEL.generate_content([prompt, uploaded_file])
+    if not result.candidates or not result.candidates[0].content.parts:
+        raise HTTPException(status_code=500, detail="Empty AI response")
 
-Return only the JSON object."""
-    
-    flashcards = generate_flashcards(prompt)
-    return {"flashcards": flashcards}
+    ai_reply = "".join(
+        p.text for p in result.candidates[0].content.parts if hasattr(p, "text")
+    )
+    parsed = parse_json(ai_reply)
+    quiz = parsed.get("quiz", [])
+
+    if not quiz:
+        raise HTTPException(status_code=500, detail="No valid quiz generated")
+
+    return {"quiz": quiz}
 
 
 @app.post("/flashcards/from-text")
@@ -260,123 +347,6 @@ Return only the JSON object."""
     flashcards = generate_flashcards(prompt)
     return {"flashcards": flashcards}
 
-
-@app.post("/flashcards/from-title")
-async def flashcards_from_title(title: str):
-    """Generate detailed flashcards from topic title"""
-    
-    if not title or not title.strip():
-        raise HTTPException(status_code=400, detail="Title cannot be empty")
-
-    title = title.strip()
-
-    prompt = f"""Create educational flashcards for each topic below.
-
-Return ONLY valid JSON in this format:
-
-    {{"title": "Exact title from input", "content": "Educational explanation (2-4 sentences)"}}
-
-
-Rules:
-- One flashcard per title
-- Accurate and informative content
-- Clear language for students
-- No markdown or special formatting
-
-Topics:
-\"\"\"{title}\"\"\"
-
-Return only the JSON object."""
-    
-    flashcards = generate_single_flashcard(prompt)
-    return {"flashcard": flashcards}
-
-@app.post("/quiz/from-file")
-async def quiz_from_file(file: UploadFile = File(...), instruction: str = None):
-    """Generate quiz questions (MCQs) from PDF/DOCX/PPTX file, optionally following teacher's instruction"""
-
-    filename = file.filename.lower()
-    if not (filename.endswith('.pdf') or filename.endswith('.docx') or filename.endswith('.pptx')):
-        raise HTTPException(status_code=400, detail="Only PDF, DOCX, and PPTX files supported")
-
-    contents = await file.read()
-    if len(contents) == 0:
-        raise HTTPException(status_code=400, detail="Empty file")
-
-    if len(contents) > 15_000_000:
-        raise HTTPException(status_code=400, detail="File too large (max 15MB)")
-
-    b64 = base64.b64encode(contents).decode('ascii')
-
-    if filename.endswith('.pdf'):
-        mime = "application/pdf"
-    elif filename.endswith('.docx'):
-        mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    else:
-        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-
-    teacher_note = f"Teacher Instruction: {instruction}\n" if instruction else ""
-
-    prompt = f"""
-{teacher_note}
-You are an expert educational content creator.
-
-Generate a quiz in strict JSON format based on this document.
-
-Return ONLY valid JSON in the following structure:
-{{
-  "quiz": [
-    {{
-      "question": "Meaningful question text?",
-      "options": {{
-        "a": "Option A",
-        "b": "Option B",
-        "c": "Option C",
-        "d": "Option D"
-      }},
-      "answer": "a | b | c | d"
-    }}
-  ]
-}}
-
-Rules:
-- no of multiple-choice questions : from instruction and if not provided, generate 5-15 questions
-- Each question must be clear and concise
-- Each question must have exactly 4 options (a–d)
-- Only one correct answer per question
-- Answer key should be one of: "a", "b", "c", "d"
-- Questions must be factual, clear, and educational
-- Do NOT use markdown or explanation text outside JSON
-- Focus on key topics, definitions, and concepts from the document
-
-Document:
-[BINARY_FILE]
-MIME:{mime}
-FILENAME:{filename}
-BASE64_DATA:{b64}
-[/BINARY_FILE]
-
-Return only the JSON object.
-    """
-
-    quiz = generate_quiz(prompt)
-    return {"quiz": quiz}
-
-
-
-
-@app.get("/")
-async def root():
-    """API information"""
-    return {
-        "name": "Flashcard API",
-        "version": "2.0.0",
-        "endpoints": {
-            "POST /flashcards/from-file": "Upload PDF/DOCX/PPTX file",
-            "POST /flashcards/from-text": "Send long text content",
-            "POST /flashcards/from-title": "Send topic title"
-        }
-    }
 
 
 if __name__ == "__main__":
