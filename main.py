@@ -6,6 +6,7 @@ import json
 import re
 import base64
 import google.generativeai as genai
+import tempfile
 
 # Load environment
 load_dotenv()
@@ -179,7 +180,7 @@ async def flashcards_from_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Only PDF, DOCX, and PPTX files supported")
 
     # Save file temporarily
-    temp_path = f"/tmp/{filename}"
+    temp_path = tempfile.gettempdir() + f"/{filename}"
     with open(temp_path, "wb") as f:
         f.write(await file.read())
 
@@ -259,7 +260,7 @@ async def quiz_from_file(file: UploadFile = File(...), instruction: str = None):
         raise HTTPException(status_code=400, detail="Only PDF, DOCX, and PPTX files supported")
 
     # Save file temporarily
-    temp_path = f"/tmp/{filename}"
+    temp_path = tempfile.gettempdir() + f"/{filename}"
     with open(temp_path, "wb") as f:
         f.write(await file.read())
 
